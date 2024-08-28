@@ -1,3 +1,9 @@
+"""
+Author: Saleh Refahi
+Email: sr3622@drexel.edu
+"""
+
+
 import os
 import numpy as np
 import pandas as pd
@@ -7,6 +13,7 @@ import torch.optim as optim
 from sklearn.metrics import f1_score, r2_score
 from joblib import Parallel, delayed
 from tqdm import tqdm
+import yaml
 
 # Ensure reproducibility
 def set_random_seed(seed):
@@ -54,27 +61,42 @@ def train_pytorch_model(X, y, num_epochs=130, learning_rate=0.01):
     r2 = r2_score(y, y_pred)
     return model, r2, y_pred
 
+
+def fast_micro_f1(y_true, y_pred):
+    # Calculate TP, FP, FN using vectorized operations
+    tp = np.sum(y_true == y_pred)
+    fp_fn = np.sum(y_true != y_pred)
+    
+    # Compute precision and recall
+    precision = tp / (tp + fp_fn)
+    recall = tp / (tp + fp_fn)
+    
+    # Calculate micro F1 score
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
 # Function to calculate F1 score
-def calculate_f1_score(distance_value, level, df_mms):
-    filtered_df = df_mms[df_mms[2] <= distance_value]
-    score = f1_score(filtered_df[f'{level}_query'], filtered_df[f'{level}_target'], average='micro')
-    return score
+def calculate_f1_score(distance_value, df, query_col, target_col):
+    mask = df[2].values <= distance_value
+    score = fast_micro_f1(query_col[mask], target_col[mask])
+    return score, np.sum(mask)
+
 
 def train_distance_confidence(df,hierarchy,level,num_distance=4000) :
 
-    
+    print(f"Training Confidence Score for {level}")
     # Find the index of the given level
     level_index = hierarchy.index(level)
 
-    filtered_df = df
     
     # Filter rows where all upper levels are correct
     for i in range(level_index):
         upper_level = hierarchy[i]
-        filtered_df = filtered_df[filtered_df[f'{upper_level}_query'] == filtered_df[f'{upper_level}_target']]
+        df = df[df[f'{upper_level}_query'] ==df[f'{upper_level}_target']]
     
 
-    df = filtered_df
     # df_mms = df_mms.groupby(0).nth(5)
     # Calculate the minimum and maximum values of df_mms[2]
     min_distance = df[2].min()
@@ -87,52 +109,142 @@ def train_distance_confidence(df,hierarchy,level,num_distance=4000) :
     num_filtered_values = []
     
     # Number of CPU cores for parallel processing
-    num_cores = 12
+    num_cores = 14
     
-    # Parallel execution of the loop
-    metrics_values = Parallel(n_jobs=num_cores)(
-        delayed(calculate_f1_score)(distance_value, level, df)
+    query_col = df[f'{level}_query'].values
+    target_col = df[f'{level}_target'].values
+    
+    
+    # Parallel execution
+    values = Parallel(n_jobs=num_cores)(
+        delayed(calculate_f1_score)(distance_value, df, query_col, target_col)
         for distance_value in tqdm(distance_values)
     )
+    metrics_values, num_filtered_values = zip(*values)
+    
     X = np.array(distance_values[1:])  # Ensure X is a 2D array
     X = X.reshape(-1, 1) 
     y =metrics_values[1:]
         
     model, r2, y_pred = train_pytorch_model(X, y)
 
-    return model,X,y
+
+    df.loc[:, f"{level}_dist"] = test_distance_confidence(model, df[2].values)
+
+    # Group by the first column (group_key)
+    grouped = df.groupby(0)
+    
+    probabilities= grouped.apply(lambda group: cal_prob(group, level)).reset_index()
+    
+    threshold = None
+    dist_th = None
+    
+    min_diff = float('inf')
+    min_dist = float('inf')
+    
+    for distance, metric, number in zip(distance_values[1:], metrics_values[1:], num_filtered_values[1:]):
+        normalized_number = number / len(num_filtered_values)
+        diff = abs(normalized_number - metric)
+        if diff < min_diff:
+            min_diff = diff
+            dist_th = distance
+    
+    for _, row in probabilities.iterrows():
+        diff = abs(dist_th - row[f"{level}_dist"])
+        if diff < min_dist:
+            min_dist = diff
+            threshold = row[f"{level}_confidence_score"]
+
+    
+    return model,X,y,threshold
  
 
 # Function to make predictions with a trained model and evaluate R^2
 def test_distance_confidence(model, new_X):
-    new_X_tensor = torch.tensor(new_X, dtype=torch.float32).reshape(-1, 1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    
+    new_X_tensor = torch.tensor(new_X, dtype=torch.float32).reshape(-1, 1).to(device)
+    
     with torch.no_grad():
-        new_y_pred = model(new_X_tensor).numpy()
+        new_y_pred = model(new_X_tensor).cpu().numpy()  # Move the result back to CPU for numpy conversion
+    
     return new_y_pred
+
+
+
+# Define a function to calculate class probabilities for each level in levels , we have similiar function for inference as well with name calculate_confidence
+def cal_prob(x, level):
+    probabilities = {}
+    # Get all unique classes in the target column for this level
+    unique_classes = np.unique(x[level + '_target'])
+    
+    # Create a dictionary to store probabilities for each class
+    class_probabilities = {}
+
+    total_in_class = len(x)
+    
+    # Calculate the probability for each class
+    for cls in unique_classes:
+        matches = (x[level + '_target'] == cls)
+        probability = matches.sum() / total_in_class
+        probability_dist = np.max(x[x[level + '_target'] == cls][f'{level}_dist'])
+        # class_probabilities[f'probability_class_{cls}'] = ( probability*probability_dist)
+        if probability_dist >  probability :
+            class_probabilities[f'probability_class_{cls}'] = (probability* probability_dist)
+        else:
+            class_probabilities[f'probability_class_{cls}'] = (probability_dist)
+    # Find the class with the maximum probability
+    max_class = max(class_probabilities, key=class_probabilities.get)
+    max_probability = class_probabilities[max_class]
+
+    probabilities[f"{level}_predicted"] = max_class.replace("probability_class_", "")
+    probabilities[f"{level}_confidence_score"] = max_probability
+    probabilities[f"{level}_dist"] = np.mean(x[f'{level}_dist'])
+
+    return pd.Series(probabilities)
+
+
 
 # Main execution function
 def confidence_score(metadata, levels_to_check,hierarchy, df_mms,output, num_distance=4000):
     
-    # df_mms = pd.read_csv(filename, sep="\t", header=None)
-
+    print("Performing Confidence Score function...")
+    
     def check_match(index, level, metadata):
-        if str(metadata.loc[index, level]).isspace():
+        value = str(metadata.loc[index, level])
+        if value.isspace():
             return None
-        return metadata.loc[index, level]
-
+        return value
+    
+    # Prepare a dictionary to store results temporarily
+    query_results = {level: [] for level in levels_to_check}
+    target_results = {level: [] for level in levels_to_check}
+    
+    # Iterate over the rows once and store the results
+    for _, row in tqdm(df_mms.iterrows()):
+        for level in levels_to_check:
+            query_results[level].append(check_match(row[0], level, metadata))
+            target_results[level].append(check_match(row[1], level, metadata))
+    
+    # Assign the stored results to the DataFrame
     for level in levels_to_check:
-        df_mms[level + '_query'] = df_mms.apply(lambda row: check_match(row[0], level, metadata), axis=1)
-        df_mms[level + '_target'] = df_mms.apply(lambda row: check_match(row[1], level, metadata), axis=1)
-
+        df_mms[level + '_query'] = query_results[level]
+        df_mms[level + '_target'] = target_results[level]
+    
+    # Drop rows with NaN values
     df_mms.dropna(subset=[level + '_query' for level in levels_to_check] + [level + '_target' for level in levels_to_check], inplace=True)
 
-    model_list = []
-    for level in levels_to_check:
-        model, X, y = train_distance_confidence(df_mms,hierarchy, level, num_distance)
-        model_list.append(model)
 
-    for i, model in enumerate(model_list):
-        torch.save(model.state_dict(), f"{output}/confidence_{levels_to_check[i]}.pth")
+
+    with open(f'{output}/params.yaml', 'a') as f:
+        for i, level in enumerate(levels_to_check):
+            model, X, y, threshold = train_distance_confidence(df_mms, hierarchy, level, num_distance)
+            torch.save(model.state_dict(), f"{output}/confidence_{levels_to_check[i]}.pth")
+            # Write the new information to the YAML file
+            yaml.dump({f'threshold_{levels_to_check[i]}': float(threshold)}, f, default_flow_style=False)
+
+
 
 # # Example usage
 # if __name__ == "__main__":
