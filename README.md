@@ -16,7 +16,7 @@ The [GitHub Wiki](https://github.com/MsAlEhR/Scorpio/wiki) also contains tutoria
 
 ## Training Data
 
-For training the gene-taxa model with full genes, we have included the data in this Zenodo record: [Zenodo](https://zenodo.org/records/12964684). Please follow the instructions below to fully download the data. This data can be used with the `triplet_trainer` to train and save the model:
+For training the gene-taxa model with full genes, we have included the data in this Zenodo record: [Zenodo](https://zenodo.org/records/12964684). Please follow the instructions below to fully download the data. This data can be used with the `trainer` to train and save the model:
 
 ```bash
 wget https://zenodo.org/api/records/12175913/files-archive -O scorpio-gene-taxa.zip
@@ -72,21 +72,6 @@ You can set up the environment for `scorpio` using either a conda environment or
 
 After following the steps for either method, your environment should be set up and ready to use the `scorpio` tool.
 
-Got it. Here's a more concise version focusing just on cloning the repository with Git LFS:
-
-
-## Cloning the Repository with Git LFS
-
-In this repository, we use Git Large File Storage (LFS) to manage large files. Please install LFS before cloning the repo:
-
-1. **Initialize Git LFS:**
-    ```bash
-    git lfs install
-    ```
-2. **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    ```
 
 
 
